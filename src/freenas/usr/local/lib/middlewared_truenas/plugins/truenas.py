@@ -44,6 +44,9 @@ class TruenasCustomerInformationModel(sa.Model):
 
 class TrueNASService(Service):
 
+    class Config:
+        cli_namespace = "system.truenas"
+
     @accepts()
     async def get_chassis_hardware(self):
         """

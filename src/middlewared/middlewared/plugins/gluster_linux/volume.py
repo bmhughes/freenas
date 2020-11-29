@@ -12,6 +12,7 @@ class GlusterVolumeService(Service):
 
     class Config:
         namespace = 'gluster.volume'
+        cli_namespace = 'service.gluster.volume'
 
     @private
     def removebrick_volume(self, name, data):

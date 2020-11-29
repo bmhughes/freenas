@@ -17,6 +17,7 @@ class GlusterPeerService(Service):
 
     class Config:
         namespace = 'gluster.peer'
+        cli_namespace = 'service.gluster.peer'
 
     @private
     def _parse_peer(self, p):

@@ -18,6 +18,7 @@ class CtdbSharedVolumeService(Service):
 
     class Config:
         namespace = 'ctdb.shared.volume'
+        cli_namespace = 'sharing.ctdb.volume'
 
     @private
     def construct_gluster_volume_create_data(self, peers):
