@@ -75,34 +75,6 @@ class CtdbIpService(Service):
                 f'"{SHARED_VOL}" is not mounted'
             )
 
-        verrors.check()
-
-        # validate the netmask
-        netmask_min = 0
-        v4max = 32
-        v6max = 128
-        bad_netmask = False
-        if ':' in data['ip'] and data['netmask'] > v6max:
-            bad_netmask = True
-        elif data['netmask'] > v4max:
-            bad_netmask = True
-        elif data['netmask'] < netmask_min:
-            bad_netmask = True
-
-        if bad_netmask:
-            verrors.add(
-                f'{schema_name}.{data["netmask"]}',
-                f'The netmask: "{data["netmask"]}" for "{data["ip"]}" is invalid.',
-            )
-
-        # validate the interface
-        node_ints = [i['id'] for i in (await self.middleware.call('interface.query'))]
-        if data['interface'] not in node_ints:
-            verrors.add(
-                f'{schema_name}.{data["interface"]}',
-                f'{data["interface"]} does not exist on this node. ',
-            )
-
         # we have to make sure the IP that was given to us doesn't exist
         # on the node since ctdb daemon automatically creates and manages
         # this address
@@ -120,6 +92,32 @@ class CtdbIpService(Service):
         cur_ips.extend((await self.middleware.call('ctdb.public.ips.query')))
 
         if not delete:
+            # validate the netmask
+            netmask_min = 0
+            v4max = 32
+            v6max = 128
+            bad_netmask = False
+            if ':' in data['ip'] and data['netmask'] > v6max:
+                bad_netmask = True
+            elif data['netmask'] > v4max:
+                bad_netmask = True
+            elif data['netmask'] < netmask_min:
+                bad_netmask = True
+
+            if bad_netmask:
+                verrors.add(
+                    f'{schema_name}.{data["netmask"]}',
+                    f'The netmask: "{data["netmask"]}" for "{data["ip"]}" is invalid.',
+                )
+
+            # validate the interface
+            node_ints = [i['id'] for i in (await self.middleware.call('interface.query'))]
+            if data['interface'] not in node_ints:
+                verrors.add(
+                    f'{schema_name}.{data["interface"]}',
+                    f'{data["interface"]} does not exist on this node. ',
+                )
+
             # make sure public ip doesn't already exist in the cluster
             if data['ip'] in cur_ips:
                 verrors.add(
