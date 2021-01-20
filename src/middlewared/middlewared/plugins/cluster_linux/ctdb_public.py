@@ -35,7 +35,7 @@ class CtdbIpService(CRUDService):
         #       `PUB_IP_FILE` then read it and return the contents
         if self.middleware.call_sync('service.started', 'ctdb'):
             ips = self.middleware.call_sync('ctdb.general.ips')
-            ips = list(map(lambda i: dict(i, id=i['public_ip']), ips))
+            ips = list(map(lambda i: dict(i, id=i['pnn']), ips))
         else:
             try:
                 mounted = pathlib.Path(SHARED_VOL).is_mount()
@@ -50,13 +50,19 @@ class CtdbIpService(CRUDService):
                 if pub_ip_file.exists():
                     if etc_ip_file.is_symlink() and etc_ip_file.resolve() == pub_ip_file:
                         with open(PUB_IP_FILE) as f:
-                            lines = f.read().splitlines()
-                            for i in lines:
+                            for idx, i in enumerate(f.read().splitlines()):
+                                # we build a list of dicts that match what the
+                                # ctdb daemon returns if it's running to keep
+                                # things consistent
                                 ips.append({
-                                    'id': i.split('/')[0],
+                                    'id': idx,
+                                    'pnn': idx,
                                     'public_ip': i.split('/')[0],
-                                    'netmask': int(i.split('/')[1].split()[0]),
-                                    'interfaces': list(i.split()[-1]),
+                                    'interfaces': [{
+                                        'name': i.split()[-1],
+                                        'active': False,
+                                        'available': False,
+                                    }]
                                 })
 
         return filter_list(ips, filters, options)
@@ -95,8 +101,8 @@ class CtdbIpService(CRUDService):
         verrors.check()
 
         # get the current ips in the cluster
-        cur_ips = [i['id'] for i in (await self.middleware.call('ctdb.private.ips.query'))]
-        cur_ips.extend([i['id'] for i in (await self.middleware.call('ctdb.public.ips.query'))])
+        cur_ips = [i['address'] for i in (await self.middleware.call('ctdb.private.ips.query'))]
+        cur_ips.extend([i['public_ip'] for i in (await self.middleware.call('ctdb.public.ips.query'))])
 
         if not delete:
             # validate the netmask
@@ -219,19 +225,17 @@ class CtdbIpService(CRUDService):
 
         return data
 
-    @accepts(Str('id'))
+    @accepts(Int('id'))
     @job(lock=PUB_LOCK)
     async def do_delete(self, job, id):
         """
-        Delete a Public IP address from the ctdb cluster.
-
-        `ip` is an IP v4/v6 address
+        Delete a Public IP address from the ctdb cluster with pnn value of `id`.
         """
 
         schema_name = 'node_delete'
         verrors = ValidationErrors()
 
-        data = {'ip': (await self.get_instance(id))['id']}
+        data = {'ip': (await self.get_instance(id))['public_ip']}
         await self.middleware.call('ctdb.public.ips.common_validation', data, schema_name, verrors, True)
         await self.middleware.call('ctdb.public.ips.update_file', data, verrors, True)
 

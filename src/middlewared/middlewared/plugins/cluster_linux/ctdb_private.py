@@ -1,4 +1,4 @@
-from middlewared.schema import Dict, IPAddr, Str
+from middlewared.schema import Dict, IPAddr, Int
 from middlewared.service import (accepts, private, job,
                                  CRUDService, ValidationErrors,
                                  CallError, filterable)
@@ -52,9 +52,10 @@ class CtdbIpService(CRUDService):
                 if pri_ip_file.exists():
                     if etc_ip_file.is_symlink() and etc_ip_file.resolve() == pri_ip_file:
                         with open(PRI_IP_FILE) as f:
-                            for i in f.read().splitlines():
+                            for idx, i in enumerate(f.read().splitlines()):
                                 ips.append({
-                                    'id': i,
+                                    'id': idx,
+                                    'pnn': idx,
                                     'address': i,
                                 })
 
@@ -84,8 +85,8 @@ class CtdbIpService(CRUDService):
         verrors.check()
 
         # get the current ips in the cluster
-        cur_ips = [i['id'] for i in (await self.middleware.call('ctdb.private.ips.query'))]
-        cur_ips.extend([i['id'] for i in (await self.middleware.call('ctdb.public.ips.query'))])
+        cur_ips = [i['address'] for i in (await self.middleware.call('ctdb.private.ips.query'))]
+        cur_ips.extend([i['public_ip'] for i in (await self.middleware.call('ctdb.public.ips.query'))])
 
         if not delete:
             # make sure private ip doesn't already exist in the cluster
@@ -135,7 +136,7 @@ class CtdbIpService(CRUDService):
         if ctdb_file.exists():
             if self.middleware.call_sync('service.started', 'ctdb'):
                 if not self.middleware.call_sync('ctdb.general.healthy'):
-                    raise CallError('ctdb cluster is not healthy, not updating private ip files')
+                    raise CallError('ctdb cluster is not healthy, not updating private ip file')
 
         # make sure the private ip file exists
         try:
@@ -213,19 +214,17 @@ class CtdbIpService(CRUDService):
 
         return data['ip']
 
-    @accepts(Str(id))
+    @accepts(Int(id))
     @job(lock=PRI_LOCK)
     async def delete(self, job, id):
         """
-        Delete a Private IP address from the ctdb cluster.
-
-        `id` is an IP v4/v6 address
+        Delete a Private IP address from the ctdb cluster with pnn value of `id`.
         """
 
         schema_name = 'node_delete'
         verrors = ValidationErrors()
 
-        address = (await self.get_instance(id))['id']
+        address = (await self.get_instance(id))['address']
         await self.middleware.call('ctdb.private.ips.common_validation', address, schema_name, verrors, True)
         await self.middleware.call('ctdb.private.ips.update_file', address, verrors, True)
 
