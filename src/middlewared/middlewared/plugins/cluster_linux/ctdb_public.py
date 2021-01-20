@@ -1,7 +1,8 @@
 from middlewared.schema import Dict, IPAddr, Int, Str
 from middlewared.service import (accepts, private, job,
-                                 Service, ValidationErrors,
-                                 CallError)
+                                 CRUDService, ValidationErrors,
+                                 CallError, filterable)
+from middlewared.utils import filter_list
 from middlewared.plugins.cluster_linux.utils import CTDBConfig
 import pathlib
 
@@ -12,16 +13,15 @@ ETC_IP_FILE = CTDBConfig.ETC_PUB_IP_FILE.value
 PUB_LOCK = CTDBConfig.PUB_LOCK.value
 
 
-class CtdbIpService(Service):
+class CtdbIpService(CRUDService):
 
     class Config:
         namespace = 'ctdb.public.ips'
 
-    @private
-    def query(self):
+    @filterable
+    def query(self, filters=None, options=None):
 
         ips = []
-
         # logic is as follows:
         #   1. if ctdb daemon is started
         #       ctdb just reads the `ETC_IP_FILE` and loads the
@@ -34,7 +34,8 @@ class CtdbIpService(Service):
         #       and is a symlink and the symlink is pointed to the
         #       `PUB_IP_FILE` then read it and return the contents
         if self.middleware.call_sync('service.started', 'ctdb'):
-            ips = [i['address'] for i in self.middleware.call_sync('ctdb.general.ips')]
+            ips = self.middleware.call_sync('ctdb.general.ips')
+            ips = list(map(lambda i: dict(i, id=i['public_ip']), ips))
         else:
             try:
                 mounted = pathlib.Path(SHARED_VOL).is_mount()
@@ -50,9 +51,15 @@ class CtdbIpService(Service):
                     if etc_ip_file.is_symlink() and etc_ip_file.resolve() == pub_ip_file:
                         with open(PUB_IP_FILE) as f:
                             lines = f.read().splitlines()
-                            ips = [i.split('/')[0] for i in lines]
+                            for i in lines:
+                                ips.append({
+                                    'id': i.split('/')[0],
+                                    'public_ip': i.split('/')[0],
+                                    'netmask': int(i.split('/')[1].split()[0]),
+                                    'interfaces': list(i.split()[-1]),
+                                })
 
-        return ips
+        return filter_list(ips, filters, options)
 
     @private
     async def common_validation(self, data, schema_name, verrors, delete=False):
@@ -88,8 +95,8 @@ class CtdbIpService(Service):
         verrors.check()
 
         # get the current ips in the cluster
-        cur_ips = await self.middleware.call('ctdb.private.ips.query')
-        cur_ips.extend((await self.middleware.call('ctdb.public.ips.query')))
+        cur_ips = [i['id'] for i in (await self.middleware.call('ctdb.private.ips.query'))]
+        cur_ips.extend([i['id'] for i in (await self.middleware.call('ctdb.public.ips.query'))])
 
         if not delete:
             # validate the netmask
@@ -146,9 +153,8 @@ class CtdbIpService(Service):
         # make sure the public ip file exists
         try:
             ctdb_file.touch(exist_ok=True)
-        except Exception:
-            self.logger.error('Failed creating %s', str(ctdb_file), exc_info=True)
-            return False
+        except Exception as e:
+            raise CallError(f'Failed creating {ctdb_file} with error {e}')
 
         # we need to make sure that the local etc public ip file
         # is symlinked to the ctdb shared volume public ip file
@@ -168,22 +174,19 @@ class CtdbIpService(Service):
         if delete_it:
             try:
                 etc_file.unlink()
-            except Exception:
-                self.logger.error('Failed deleting %s', str(etc_file), exc_info=True)
-                return False
+            except Exception as e:
+                raise CallError(f'Failed deleting {etc_file} with errror {e}')
 
         if symlink_it:
             try:
                 etc_file.symlink_to(ctdb_file)
-            except Exception:
-                self.logger.error('Failed symlinking %s to %s', str(etc_file), str(ctdb_file), exc_info=True)
-                return False
+            except Exception as e:
+                raise CallError(f'Failed symlinking {etc_file} to {ctdb_file} with error {e}')
 
         if not delete:
             entry = f'{data["ip"]}/{data["netmask"]} {data["interface"]}'
             with open(PUB_IP_FILE, 'a') as f:
                 f.write(entry + '\n')
-                f.flush()
         else:
             with open(PUB_IP_FILE) as f:
                 lines = f.read().splitlines()
@@ -191,9 +194,6 @@ class CtdbIpService(Service):
             lines.remove(next(i for i in lines if data['ip'] in i))
             with open(PUB_IP_FILE, 'w') as f:
                 f.writelines(map(lambda x: x + '\n', lines))
-                f.flush()
-
-        return True
 
     @accepts(Dict(
         'node_create',
@@ -202,7 +202,7 @@ class CtdbIpService(Service):
         Str('interface', required=True),
     ))
     @job(lock=PUB_LOCK)
-    async def create(self, job, data):
+    async def do_create(self, job, data):
         """
         Add a ctdb public address to the cluster
 
@@ -214,20 +214,14 @@ class CtdbIpService(Service):
         schema_name = 'node_create'
         verrors = ValidationErrors()
 
-        await self.middleware.call(
-            'ctdb.public.ips.common_validation', data, schema_name, verrors
-        )
-        if not await self.middleware.call('ctdb.public.ips.update_file', data, verrors):
-            raise CallError(f'Failed updating {PUB_IP_FILE}. Please check logs.')
+        await self.middleware.call('ctdb.public.ips.common_validation', data, schema_name, verrors)
+        await self.middleware.call('ctdb.public.ips.update_file', data, verrors)
 
         return data
 
-    @accepts(Dict(
-        'node_delete',
-        IPAddr('ip'),
-    ))
+    @accepts(Str('id'))
     @job(lock=PUB_LOCK)
-    async def delete(self, job, data):
+    async def do_delete(self, job, id):
         """
         Delete a Public IP address from the ctdb cluster.
 
@@ -237,10 +231,8 @@ class CtdbIpService(Service):
         schema_name = 'node_delete'
         verrors = ValidationErrors()
 
-        await self.middleware.call(
-            'ctdb.public.ips.common_validation', data, schema_name, verrors, True
-        )
-        if not await self.middleware.call('ctdb.public.ips.update_file', data, verrors, True):
-            raise CallError(f'Failed updating {PUB_IP_FILE}. Please check logs.')
+        data = {'ip': (await self.get_instance(id))['id']}
+        await self.middleware.call('ctdb.public.ips.common_validation', data, schema_name, verrors, True)
+        await self.middleware.call('ctdb.public.ips.update_file', data, verrors, True)
 
         return data['ip']
